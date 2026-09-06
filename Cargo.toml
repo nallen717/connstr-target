@@ -1,0 +1,11 @@
+[package]
+name = "ctarget"
+version = "0.1.0"
+edition = "2021"
+authors = ["nallen717"]
+license = "MIT"
+description = "Show what a connection string actually resolves to: hosts, ports, database, TLS."
+
+[[bin]]
+name = "ctarget"
+path = "src/main.rs"
