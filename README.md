@@ -48,6 +48,27 @@ file or a secrets manager without it showing up in your shell history:
 $ echo "$DATABASE_URL" | ctarget
 ```
 
+libpq's `key=value` style is recognized too, since plenty of tools (psql,
+`PGSERVICE` entries, `libpq.conf`) use it instead of a URI:
+
+```
+$ ctarget "host=db1,db2 port=5432 dbname=orders user=app sslmode=require"
+scheme:   postgres (libpq key=value)
+auth:     app (no password)
+hosts:    2 target(s), tried in order
+  1. db1:5432
+  2. db2:5432
+database: orders
+tls:      likely on, sslmode=require
+params:
+  sslmode = require
+```
+
+A single `port=` applies to every host in the `host=` list; if you give more
+than one port, the counts have to match. Leaving `host=` out entirely is
+recognized as libpq's local unix-socket fallback, but the actual socket path
+isn't resolved (see below).
+
 ## Supported schemes
 
 Recognizes default ports and TLS conventions for `postgres`/`postgresql`,
@@ -59,8 +80,8 @@ default port to fall back on.
 
 - No DNS resolution and no SRV record lookups (`mongodb+srv` is recognized
   by scheme but the real host list behind an SRV record isn't fetched).
-- No `key=value` libpq-style strings (`host=a port=b user=c`), only URI
-  style ones.
+- No resolution of libpq's unix-socket default when `host=` is omitted -
+  it's reported as such, not given a real path.
 - No connecting, no credential validation, no network access at all.
 
 ## Build

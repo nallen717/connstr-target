@@ -54,7 +54,9 @@ fn print_usage() {
     eprintln!("usage: ctarget <connection-string>");
     eprintln!("       echo <connection-string> | ctarget");
     eprintln!();
-    eprintln!("example: ctarget 'postgres://app:secret@db1:5432,db2:5432/orders?sslmode=require'");
+    eprintln!("accepts either a URI-style string or a libpq key=value string:");
+    eprintln!("  ctarget 'postgres://app:secret@db1:5432,db2:5432/orders?sslmode=require'");
+    eprintln!("  ctarget \"host=db1,db2 port=5432 dbname=orders user=app sslmode=require\"");
 }
 
 // (default_port, tls_forced)
@@ -75,6 +77,14 @@ fn scheme_info(scheme: &str) -> Option<(u16, bool)> {
 }
 
 fn parse(input: &str) -> Result<Parsed, String> {
+    if input.contains("://") {
+        parse_uri(input)
+    } else {
+        parse_libpq(input)
+    }
+}
+
+fn parse_uri(input: &str) -> Result<Parsed, String> {
     let (scheme, rest) = input
         .split_once("://")
         .ok_or_else(|| "missing scheme (expected something like scheme://...)".to_string())?;
@@ -146,6 +156,158 @@ fn parse(input: &str) -> Result<Parsed, String> {
         params,
         tls_note,
     })
+}
+
+// libpq key=value strings have no scheme; postgres is the only driver family
+// that uses this format, so the defaults below match postgres's own.
+fn parse_libpq(input: &str) -> Result<Parsed, String> {
+    let pairs = tokenize_libpq(input)?;
+    if pairs.is_empty() {
+        return Err("empty connection string".to_string());
+    }
+
+    let mut host_str: Option<String> = None;
+    let mut port_str: Option<String> = None;
+    let mut dbname: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut password_present = false;
+    let mut params = Vec::new();
+
+    for (k, v) in pairs {
+        match k.as_str() {
+            "host" | "hostaddr" => host_str = Some(v),
+            "port" => port_str = Some(v),
+            "dbname" => dbname = Some(v),
+            "user" => user = Some(v),
+            "password" => password_present = true,
+            _ => params.push((k, v)),
+        }
+    }
+
+    let host_list: Vec<&str> = match &host_str {
+        Some(h) if !h.is_empty() => h.split(',').collect(),
+        _ => Vec::new(),
+    };
+    let port_list: Vec<&str> = match &port_str {
+        Some(p) if !p.is_empty() => p.split(',').collect(),
+        _ => Vec::new(),
+    };
+
+    if port_list.len() > 1 && host_list.len() > 1 && port_list.len() != host_list.len() {
+        return Err(format!(
+            "{} host(s) but {} port(s); libpq needs one port for all hosts or one per host",
+            host_list.len(),
+            port_list.len()
+        ));
+    }
+
+    let mut hosts = Vec::new();
+    if host_list.is_empty() {
+        // libpq with no host= falls back to a local unix-domain socket,
+        // not to "localhost" - see the unix socket item on the roadmap.
+        let port = port_list.first().and_then(|p| p.parse::<u16>().ok()).or(Some(5432));
+        hosts.push(("(unix socket, default path not resolved)".to_string(), port, false));
+    } else {
+        for (i, h) in host_list.iter().enumerate() {
+            let port_text = if port_list.len() == 1 {
+                Some(port_list[0])
+            } else {
+                port_list.get(i).copied()
+            };
+            let port = match port_text {
+                Some(p) if !p.is_empty() => Some(
+                    p.parse::<u16>()
+                        .map_err(|_| format!("bad port '{}'", p))?,
+                ),
+                _ => None,
+            };
+            let explicit = port.is_some();
+            let resolved = port.or(Some(5432));
+            hosts.push((h.to_string(), resolved, explicit));
+        }
+    }
+
+    let tls_note = tls_note("postgres", false, &params);
+
+    Ok(Parsed {
+        scheme: "postgres (libpq key=value)".to_string(),
+        username: user,
+        password_present,
+        hosts,
+        database: dbname,
+        params,
+        tls_note,
+    })
+}
+
+fn tokenize_libpq(input: &str) -> Result<Vec<(String, String)>, String> {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < n {
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+
+        let key_start = i;
+        while i < n && chars[i] != '=' && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n || chars[i] != '=' {
+            let bad: String = chars[key_start..i].iter().collect();
+            return Err(format!("expected 'key=value', found '{}'", bad));
+        }
+        let key: String = chars[key_start..i].iter().collect();
+        if key.is_empty() {
+            return Err("empty key in connection string".to_string());
+        }
+        i += 1; // skip '='
+
+        let mut value = String::new();
+        if i < n && chars[i] == '\'' {
+            i += 1;
+            let mut closed = false;
+            while i < n {
+                match chars[i] {
+                    '\\' if i + 1 < n => {
+                        value.push(chars[i + 1]);
+                        i += 2;
+                    }
+                    '\'' => {
+                        closed = true;
+                        i += 1;
+                        break;
+                    }
+                    c => {
+                        value.push(c);
+                        i += 1;
+                    }
+                }
+            }
+            if !closed {
+                return Err(format!("unterminated quoted value for key '{}'", key));
+            }
+        } else {
+            while i < n && !chars[i].is_whitespace() {
+                if chars[i] == '\\' && i + 1 < n {
+                    value.push(chars[i + 1]);
+                    i += 2;
+                } else {
+                    value.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+
+        out.push((key.to_lowercase(), value));
+    }
+
+    Ok(out)
 }
 
 fn split_host_port(hp: &str) -> Result<(String, Option<u16>), String> {
