@@ -48,6 +48,16 @@ file or a secrets manager without it showing up in your shell history:
 $ echo "$DATABASE_URL" | ctarget
 ```
 
+Pass `--json` for machine-readable output instead of the report above:
+
+```
+$ ctarget --json 'redis://cache.internal/0'
+{"scheme":"redis","username":null,"password_present":false,"hosts":[{"host":"cache.internal","port":6379,"explicit":false}],"database":"0","tls":null,"params":[]}
+```
+
+On a parse error, `--json` prints `{"error": "..."}` to stdout instead of
+the plain-text message on stderr, and still exits non-zero.
+
 libpq's `key=value` style is recognized too, since plenty of tools (psql,
 `PGSERVICE` entries, `libpq.conf`) use it instead of a URI:
 

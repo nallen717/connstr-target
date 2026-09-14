@@ -21,11 +21,16 @@ struct Parsed {
 }
 
 fn main() {
-    let arg = env::args().nth(1);
-    if let Some(a) = &arg {
+    let mut json = false;
+    let mut arg: Option<String> = None;
+    for a in env::args().skip(1) {
         if a == "--help" || a == "-h" {
             print_usage();
             return;
+        } else if a == "--json" {
+            json = true;
+        } else if arg.is_none() {
+            arg = Some(a);
         }
     }
 
@@ -42,21 +47,34 @@ fn main() {
     };
 
     match parse(input.trim()) {
-        Ok(p) => print_report(&p),
+        Ok(p) => {
+            if json {
+                print_report_json(&p);
+            } else {
+                print_report(&p);
+            }
+        }
         Err(e) => {
-            eprintln!("error: {}", e);
+            if json {
+                println!("{{\"error\": {}}}", json_string(&e));
+            } else {
+                eprintln!("error: {}", e);
+            }
             process::exit(1);
         }
     }
 }
 
 fn print_usage() {
-    eprintln!("usage: ctarget <connection-string>");
-    eprintln!("       echo <connection-string> | ctarget");
+    eprintln!("usage: ctarget [--json] <connection-string>");
+    eprintln!("       echo <connection-string> | ctarget [--json]");
     eprintln!();
     eprintln!("accepts either a URI-style string or a libpq key=value string:");
     eprintln!("  ctarget 'postgres://app:secret@db1:5432,db2:5432/orders?sslmode=require'");
     eprintln!("  ctarget \"host=db1,db2 port=5432 dbname=orders user=app sslmode=require\"");
+    eprintln!();
+    eprintln!("--json prints the same fields as a single JSON object instead of a");
+    eprintln!("human-readable report, for use in scripts.");
 }
 
 // (default_port, tls_forced)
@@ -434,4 +452,82 @@ fn print_report(p: &Parsed) {
             println!("  {} = {}", k, v);
         }
     }
+}
+
+fn print_report_json(p: &Parsed) {
+    let mut out = String::from("{");
+
+    out.push_str("\"scheme\":");
+    out.push_str(&json_string(&p.scheme));
+
+    out.push_str(",\"username\":");
+    out.push_str(&json_opt_string(p.username.as_deref()));
+
+    out.push_str(",\"password_present\":");
+    out.push_str(if p.password_present { "true" } else { "false" });
+
+    out.push_str(",\"hosts\":[");
+    for (i, (host, port, explicit)) in p.hosts.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"host\":");
+        out.push_str(&json_string(host));
+        out.push_str(",\"port\":");
+        match port {
+            Some(port) => out.push_str(&port.to_string()),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"explicit\":");
+        out.push_str(if *explicit { "true" } else { "false" });
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"database\":");
+    out.push_str(&json_opt_string(p.database.as_deref()));
+
+    out.push_str(",\"tls\":");
+    out.push_str(&json_opt_string(p.tls_note.as_deref()));
+
+    out.push_str(",\"params\":[");
+    for (i, (k, v)) in p.params.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"key\":");
+        out.push_str(&json_string(k));
+        out.push_str(",\"value\":");
+        out.push_str(&json_string(v));
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push('}');
+    println!("{}", out);
+}
+
+fn json_opt_string(s: Option<&str>) -> String {
+    match s {
+        Some(s) => json_string(s),
+        None => "null".to_string(),
+    }
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
